@@ -49,6 +49,8 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
+    bool turbo = false;
+
     double nextFrameAt = 0;
     bool done = false;
     while (!done) {
@@ -60,6 +62,17 @@ int main(int argc, char *argv[]) {
                 case SDL_QUIT:
                     done = true;
                     break;
+                case SDL_KEYUP:
+                case SDL_KEYDOWN:
+                    SDL_KeyboardEvent kb = evt.key;
+                    bool pressed = kb.state == SDL_PRESSED;
+
+                    switch (kb.keysym.sym){
+                        case SDLK_SPACE:
+                            turbo = pressed;
+                            break;
+                    }
+                    break;
             }
         }
 
@@ -69,7 +82,7 @@ int main(int argc, char *argv[]) {
         if (currentSec - nextFrameAt >= SECONDS_PER_FRAME)
         {
             double diff = currentSec - nextFrameAt;
-            printf("Can't keep up! Skipping some time\n");
+            // printf("Can't keep up! Skipping some time\n");
             nextFrameAt = currentSec;
         }
 
@@ -77,6 +90,10 @@ int main(int argc, char *argv[]) {
         {
             nextFrameAt += SECONDS_PER_FRAME;
 
+            GB_run_to_next_frame(gbCore);
+        }
+
+        if (turbo) {
             GB_run_to_next_frame(gbCore);
         }
 
@@ -108,7 +125,9 @@ int main(int argc, char *argv[]) {
         SDL_RenderCopy(renderer, texture, NULL, &dest);
         SDL_RenderPresent(renderer);
 
-        SDL_Delay(1);
+        if (!turbo) {
+            SDL_Delay(1);
+        }
     }
 
     SDL_DestroyWindow(window);

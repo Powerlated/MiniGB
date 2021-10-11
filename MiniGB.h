@@ -30,10 +30,13 @@ typedef enum {
 } RegisterPair;
 
 typedef enum {
+  GB_IO_JOYP = 0x00,
+  GB_IO_IF = 0x0F,
   GB_IO_LCDC = 0x40,
   GB_IO_STAT = 0x41,
   GB_IO_LY = 0x44,
   GB_IO_BGP = 0x47,
+  GB_IO_IE = 0xFF,
 } GbIo;
 
 typedef enum {
@@ -49,6 +52,14 @@ typedef enum {
   GB_IO_LCDC_BG_TILE_MAP = 1 << 3,
   GB_IO_LCDC_BG_ENABLE = 1 << 0
 } GbIoLcdcBits;
+
+typedef enum {
+  GB_INTR_VBLANK = 0,
+  GB_INTR_STAT = 1,
+  GB_INTR_TIMER = 2,
+  GB_INTR_SERIAL = 3,
+  GB_INTR_JOYPAD = 4,
+} GbInterrupt;
 
 typedef struct {
   int32_t frameTimer;
@@ -83,6 +94,10 @@ typedef struct {
   int32_t modeTimer;
 
 } GB_core_t;
+
+void GB_flag_interrupt(GB_core_t *gb, GbInterrupt interrupt) {
+  gb->io[GB_IO_IF] |= 1 << interrupt;
+}
 
 uint32_t *GBPPU_get_display_screen_buffer(GB_core_t *gb) {
   return gb->current_screen_buffer ? gb->screen_buffer_0 : gb->screen_buffer_1;
@@ -158,6 +173,10 @@ void GBPPU_render_scanline(GB_core_t *gb) {
   }
 }
 
+void GB_write_if(GB_core_t *gb, uint8_t val) {
+  gb->io[GB_IO_IF] = 0b11100000 | val;
+}
+
 void GBPPU_step(GB_core_t *gb, uint8_t cycles) {
   gb->modeTimer += cycles;
 
@@ -187,6 +206,7 @@ void GBPPU_step(GB_core_t *gb, uint8_t cycles) {
 
         if (gb->io[GB_IO_LY] == 144) {
           GBPPU_swap_buffers(gb);
+          GB_flag_interrupt(gb, GB_INTR_VBLANK);
 
           GBPPU_set_mode(gb, GBPPU_MODE_VBLANK);
         } else {
@@ -211,8 +231,12 @@ void GBPPU_step(GB_core_t *gb, uint8_t cycles) {
 
 uint8_t GB_read_io(GB_core_t *gb, uint16_t addr) {
   switch (addr & 0xFF) {
+  case GB_IO_JOYP:
+    return 0xFF;
+  case GB_IO_IF:
   case GB_IO_LY:
   case GB_IO_BGP:
+  case GB_IO_IE:
     return gb->io[addr & 0xFF];
   }
 
@@ -223,10 +247,14 @@ uint8_t GB_read_io(GB_core_t *gb, uint16_t addr) {
 
 void GB_write_io(GB_core_t *gb, uint16_t addr, uint8_t val) {
   switch (addr & 0xFF) {
+  case GB_IO_IF:
+    GB_write_if(gb, val);
+    return;
   case GB_IO_LCDC:
     GBPPU_write_lcdc(gb, val);
     return;
   case GB_IO_BGP:
+  case GB_IO_IE:
     gb->io[addr & 0xFF] = val;
     return;
   }
@@ -451,7 +479,20 @@ uint16_t GBCPU_pop(GB_core_t *gb) {
 uint8_t GBCPU_execute(GB_core_t *gb) {
   gb->currentInstrCycles = 0;
 
-  uint8_t opcode = GB_read(gb, gb->pc++);
+  // GBCPU_print_status(gb, gb->pc);
+
+  uint8_t flagged_enabled = gb->io[GB_IO_IE] & gb->io[GB_IO_IF] & 0x1F;
+  if (gb->ime && flagged_enabled != 0) {
+    GBCPU_push(gb, gb->pc);
+    uint8_t intr = __builtin_ctz(flagged_enabled);
+    // printf("Interrupt dispatch: %d", intr);
+    gb->io[GB_IO_IF] &= ~(1 << intr);
+    gb->io[GB_IO_IF] |= 0b11100000;
+    gb->pc = 0x40 + intr * 8;
+    gb->ime = false;
+  }
+
+  uint8_t opcode = GBCPU_next8(gb);
 
   // We're going to turn formatting off here because
   // it's extremely annoying when trying to keep cases on the same line
@@ -485,29 +526,29 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
 
   // LD (FF00+u8), A
   case 0xE0:
-    GB_write(gb, 0xFF00 | GBCPU_next8(gb), gb->regs[GBCPU_REG_A]);
+    GBCPU_write(gb, 0xFF00 | GBCPU_next8(gb), gb->regs[GBCPU_REG_A]);
     break;
   // LD A, (FF00+u8)
   case 0xF0:
-    gb->regs[GBCPU_REG_A] = GB_read(gb, 0xFF00 | GBCPU_next8(gb));
+    gb->regs[GBCPU_REG_A] = GBCPU_read(gb, 0xFF00 | GBCPU_next8(gb));
     break;
 
   // LD (FF00+C), A
   case 0xE2:
-    GB_write(gb, 0xFF00 | gb->regs[GBCPU_REG_C], gb->regs[GBCPU_REG_A]);
+    GBCPU_write(gb, 0xFF00 | gb->regs[GBCPU_REG_C], gb->regs[GBCPU_REG_A]);
     break;
   // LD A, (FF00+C)
   case 0xF2:
-    gb->regs[GBCPU_REG_A] = GB_read(gb, 0xFF00 | gb->regs[GBCPU_REG_C]);
+    gb->regs[GBCPU_REG_A] = GBCPU_read(gb, 0xFF00 | gb->regs[GBCPU_REG_C]);
     break;
 
   // LD (u16), A
   case 0xEA:
-    GB_write(gb, GBCPU_next16(gb), gb->regs[GBCPU_REG_A]);
+    GBCPU_write(gb, GBCPU_next16(gb), gb->regs[GBCPU_REG_A]);
     break;
   // LD A, (u16)
   case 0xFA:
-    gb->regs[GBCPU_REG_A] = GB_read(gb, GBCPU_next16(gb));
+    gb->regs[GBCPU_REG_A] = GBCPU_read(gb, GBCPU_next16(gb));
     break;
 
   // LD r16, u16
@@ -518,26 +559,26 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
   // LD [r16], A
   case 0x02:
   case 0x12:
-    GB_write(gb, GBCPU_get_reg_pair(gb, (opcode >> 4) & 0b11), gb->regs[GBCPU_REG_A]);
+    GBCPU_write(gb, GBCPU_get_reg_pair(gb, (opcode >> 4) & 0b11), gb->regs[GBCPU_REG_A]);
     break;
 
   // LD A, [r16]
   case 0x0A:
   case 0x1A:
-    gb->regs[GBCPU_REG_A] = GB_read(gb, GBCPU_get_reg_pair(gb, (opcode >> 4) & 0b11));
+    gb->regs[GBCPU_REG_A] = GBCPU_read(gb, GBCPU_get_reg_pair(gb, (opcode >> 4) & 0b11));
     break;
 
   // LD [HL+], A
   case 0x22: {
     uint16_t pre = GBCPU_get_reg_pair(gb, GBCPU_REG_HL);
-    GB_write(gb, pre, gb->regs[GBCPU_REG_A]);
+    GBCPU_write(gb, pre, gb->regs[GBCPU_REG_A]);
     GBCPU_set_reg_pair(gb, GBCPU_REG_HL, pre + 1);
     break;
   }
   // LD [HL-], A
   case 0x32: {
     uint16_t pre = GBCPU_get_reg_pair(gb, GBCPU_REG_HL);
-    GB_write(gb, pre, gb->regs[GBCPU_REG_A]);
+    GBCPU_write(gb, pre, gb->regs[GBCPU_REG_A]);
     GBCPU_set_reg_pair(gb, GBCPU_REG_HL, pre - 1);
     break;
   }
@@ -545,14 +586,14 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
   // LD A, [HL+]
   case 0x2A: {
     uint16_t pre = GBCPU_get_reg_pair(gb, GBCPU_REG_HL);
-    gb->regs[GBCPU_REG_A] = GB_read(gb, pre);
+    gb->regs[GBCPU_REG_A] = GBCPU_read(gb, pre);
     GBCPU_set_reg_pair(gb, GBCPU_REG_HL, pre + 1);
     break;
   }
   // LD A, [HL-]
   case 0x3A: {
     uint16_t pre = GBCPU_get_reg_pair(gb, GBCPU_REG_HL);
-    gb->regs[GBCPU_REG_A] = GB_read(gb, pre);
+    gb->regs[GBCPU_REG_A] = GBCPU_read(gb, pre);
     GBCPU_set_reg_pair(gb, GBCPU_REG_HL, pre - 1);
     break;
   }
@@ -585,6 +626,13 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
     uint16_t target = GBCPU_next16(gb);
     GBCPU_push(gb, gb->pc);
     gb->pc = target;
+    break;
+  }
+
+  // RETI
+  case 0xD9: {
+    gb->pc = GBCPU_pop(gb);
+    gb->ime = true;
     break;
   }
 
@@ -682,7 +730,21 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
     GBCPU_setH(gb, true);
     break;
 
-  // AND A, u8
+  // ADD u8
+  case 0xC6: {
+    uint8_t op = GBCPU_next8(gb);
+    uint8_t res = gb->regs[GBCPU_REG_A] + op;
+
+    gb->regs[GBCPU_REG_A] = res;
+
+    GBCPU_setZ(gb, res == 0);
+    GBCPU_setN(gb, false);
+    GBCPU_setH(gb, (op & 0xF) + (res & 0xF) > 0xF);
+    GBCPU_setC(gb, (uint32_t)op + res > 0xFF);
+    break;
+  }
+
+  // AND u8
   case 0xE6: {
     uint8_t op = GBCPU_next8(gb);
     uint8_t res = gb->regs[GBCPU_REG_A] & op;
@@ -696,7 +758,21 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
     break;
   }
 
-  // OR A, u8
+  // XOR r8
+  case 0xEE: {
+    uint8_t op = GBCPU_next8(gb);
+    uint8_t res = gb->regs[GBCPU_REG_A] ^ op;
+
+    gb->regs[GBCPU_REG_A] = res;
+
+    GBCPU_setZ(gb, res == 0);
+    GBCPU_setN(gb, false);
+    GBCPU_setH(gb, false);
+    GBCPU_setC(gb, false);
+    break;
+  }
+
+  // OR u8
   case 0xF6: {
     uint8_t op = GBCPU_next8(gb);
     uint8_t res = gb->regs[GBCPU_REG_A] | op;
@@ -710,7 +786,7 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
     break;
   }
 
-  // CP A, u8
+  // CP u8
   case 0xFE: {
     uint8_t op = GBCPU_next8(gb);
     uint8_t res = gb->regs[GBCPU_REG_A] - op;
@@ -795,45 +871,56 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
     uint8_t opcode2 = GBCPU_next8(gb);
 
     uint8_t reg_id = opcode2 & 0b111;
-    uint8_t reg = GBCPU_get_reg(gb, reg_id);
+    uint8_t reg_id2 = (opcode2 >> 3) & 0b111;
 
     switch (opcode2 >> 6) {
       case 0:
-      switch ((opcode2 >> 3) & 0b111) {
-        case 0:
-          break;
-        case 1:
-          break;
-        case 2:
-          break;
-        case 3:
-          break;
-        case 4:
-          break;
-        case 5:
-          break;
-        case 6: // SWAP
         {
-          uint8_t lower = (reg >> 0) & 0xF;
-          uint8_t upper = (reg >> 4) & 0xF;
+          uint8_t reg = GBCPU_get_reg(gb, reg_id);
+          switch ((opcode2 >> 3) & 0b111) {
+            case 4: // SLA
+            {
+              uint8_t res = reg << 1;
+              
+              GBCPU_set_reg(gb, reg_id, res);
 
-          uint8_t res = (lower << 4) | upper;
+              GBCPU_setZ(gb, res == 0);
+              GBCPU_setN(gb, false);
+              GBCPU_setH(gb, false);
+              GBCPU_setC(gb, reg & (1 << 7));
+              break;
+            }
+            case 6: // SWAP
+            {
+              uint8_t lower = (reg >> 0) & 0xF;
+              uint8_t upper = (reg >> 4) & 0xF;
 
-          GBCPU_setZ(gb, res == 0);
-          GBCPU_setN(gb, false);
-          GBCPU_setH(gb, false);
-          GBCPU_setC(gb, false);
+              uint8_t res = (lower << 4) | upper;
+
+              GBCPU_setZ(gb, res == 0);
+              GBCPU_setN(gb, false);
+              GBCPU_setH(gb, false);
+              GBCPU_setC(gb, false);
+              break;
+            }
+            default:
+              printf("Unknown CB opcode: %02X @ PC:%04X\n", opcode2, gb->pc - 2);
+              GBCPU_print_status(gb, gb->pc - 1);
+              assert(0);
+              break;
+          }
           break;
         }
-        case 7:
-          break;
-      }
+      case 1: // BIT
+        GBCPU_setZ(gb, !(1 << reg_id2));
+        GBCPU_setN(gb, false);
+        GBCPU_setH(gb, false);
         break;
-      case 1:
+      case 2: // RES
+        GBCPU_set_reg(gb, reg_id, GBCPU_get_reg(gb, reg_id) & ~(1 << reg_id2));
         break;
-      case 2:
-        break;
-      case 3:
+      case 3: // SET
+        GBCPU_set_reg(gb, reg_id, GBCPU_get_reg(gb, reg_id) | (1 << reg_id2));
         break;
 
       default:
@@ -886,4 +973,5 @@ void GB_init(GB_core_t *gb) {
   gb->sp = 0xFFFE;
 
   GBPPU_write_lcdc(gb, 0x91);
+  GB_write_if(gb, 0xE1);
 }
