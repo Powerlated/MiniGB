@@ -1,1 +1,1 @@
-clang main.cpp -I "lib/SDL2-2.0.16/include" -L "lib/SDL2-2.0.16/lib/x64" -lShell32 -lSDL2main -lSDL2 -Xlinker /subsystem:console -o MiniGB.exe 
+clang main.cpp -o MiniGB.exe @compile_flags.txt

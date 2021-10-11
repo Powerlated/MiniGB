@@ -1,8 +1,8 @@
 #include <cassert>
-#include <cstring>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 typedef enum {
   GBCPU_REG_B = 0,
@@ -107,6 +107,7 @@ void GBPPU_step(GB_core_t *gb, uint8_t cycles) {
 
         GBPPU_set_mode(gb, GBPPU_MODE_HBLANK);
       }
+      break;
     case GBPPU_MODE_HBLANK:
       if (gb->modeTimer >= 204) {
         gb->modeTimer -= 204;
@@ -261,7 +262,7 @@ void GBCPU_set_reg_pair(GB_core_t *gb, uint8_t pair, uint16_t val) {
     break;
   case GBCPU_REG_AF:
     gb->regs[GBCPU_REG_A] = val >> 8;
-    gb->regs[GBCPU_REG_F] = val;
+    gb->regs[GBCPU_REG_F] = val & 0xF0;
     break;
   }
 }
@@ -375,6 +376,9 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
 
   uint8_t opcode = GB_read(gb, gb->pc++);
 
+  // We're going to turn formatting off here because
+  // it's extremely annoying when trying to keep cases on thes ame line
+  // clang-format off
   switch (opcode) {
 
   // NOP
@@ -386,10 +390,21 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
     gb->ime = false;
     break;
 
+  // EI
+  case 0xFB:
+    gb->ime = true;
+    break;
+
   // JP u16
   case 0xC3:
     gb->pc = GBCPU_next16(gb);
     break;
+
+  // JP HL
+  case 0xE9:
+    gb->pc = GBCPU_get_reg_pair(gb, GBCPU_REG_HL);
+    break;
+
 
   // LD (FF00+u8), A
   case 0xE0:
@@ -419,12 +434,20 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
     break;
 
   // LD r16, u16
-  case 0x01:
-  case 0x11:
-  case 0x21:
-  case 0x31:
-    GBCPU_set_reg_pair2(gb, (RegisterPair)((opcode >> 4) & 0b11),
-                       GBCPU_next16(gb));
+  case 0x01: case 0x11: case 0x21: case 0x31:
+    GBCPU_set_reg_pair2(gb, (opcode >> 4) & 0b11, GBCPU_next16(gb));
+    break;
+
+  // LD [r16], A
+  case 0x02:
+  case 0x12:
+    GB_write(gb, GBCPU_get_reg_pair(gb, (opcode >> 4) & 0b11), gb->regs[GBCPU_REG_A]);
+    break;
+
+  // LD A, [r16]
+  case 0x0A:
+  case 0x1A:
+    gb->regs[GBCPU_REG_A] = GB_read(gb, GBCPU_get_reg_pair(gb, (opcode >> 4) & 0b11));
     break;
 
   // LD [HL+], A
@@ -457,14 +480,25 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
     break;
   }
 
+  // JR i8
+  case 0x18: 
+    gb->pc += (int8_t)GBCPU_next8(gb);
+    break;
+
   // JR CC, i8
-  case 0x20:
-  case 0x30:
-  case 0x28:
-  case 0x38: {
+  case 0x20: case 0x30: case 0x28: case 0x38: {
     uint8_t offset = GBCPU_next8(gb);
     if (GBCPU_get_cond(gb, (opcode >> 3) & 0b11)) {
       gb->pc += (int8_t)offset;
+    }
+    break;
+  }
+
+  // JP CC, u16
+  case 0xC2: case 0xD2: case 0xCA: case 0xDA: {
+    uint16_t target = GBCPU_next16(gb);
+    if (GBCPU_get_cond(gb, (opcode >> 3) & 0b11)) {
+      gb->pc = target;
     }
     break;
   }
@@ -477,15 +511,53 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
     break;
   }
 
+  // RET
+  case 0xC9: {
+    gb->pc = GBCPU_pop(gb);
+    break;
+  }
+
+  // RET CC
+  case 0xC0: case 0xD0: case 0xC8: case 0xD8:  {
+    if (GBCPU_get_cond(gb, (opcode >> 3) & 0b11)) {
+      gb->pc = GBCPU_pop(gb);
+    }
+    break;
+  }
+
+  // PUSH r16
+  case 0xC5: case 0xD5: case 0xE5: case 0xF5:
+    GBCPU_push(gb, GBCPU_get_reg_pair(gb, (opcode >> 4) & 0b11)); 
+    break;
+
+  // POP r16
+  case 0xC1: case 0xD1: case 0xE1: case 0xF1:
+    GBCPU_set_reg_pair(gb, (opcode >> 4) & 0b11, GBCPU_pop(gb)); 
+    break;
+
+  // ADD HL, r16
+  case 0x09: case 0x19: case 0x29: case 0x39: {
+    uint16_t hl_val = GBCPU_get_reg_pair(gb, GBCPU_REG_HL);  
+    uint16_t r16_val = GBCPU_get_reg_pair2(gb, (opcode >> 4) & 0b11);  
+
+    GBCPU_set_reg_pair(gb, GBCPU_REG_HL, hl_val + r16_val);
+
+    GBCPU_setN(gb, false);
+    GBCPU_setH(gb, (hl_val & 0xFFF) + (r16_val & 0xFFF) > 0xFFF);
+    GBCPU_setC(gb, (uint32_t)hl_val + r16_val > 0xFFFF);
+    break;
+  }
+
+  // RST
+  case 0xC7: case 0xCF: case 0xD7: case 0xDF: case 0xE7: case 0xEF: case 0xF7: case 0xFF: {
+    uint16_t target = opcode & 0b111000;
+    GBCPU_push(gb, gb->pc);
+    gb->pc = target;
+    break;
+  }
+
   // INC r8
-  case 0x04:
-  case 0x14:
-  case 0x24:
-  case 0x34:
-  case 0x0C:
-  case 0x1C:
-  case 0x2C:
-  case 0x3C: {
+  case 0x04: case 0x14: case 0x24: case 0x34: case 0x0C: case 0x1C: case 0x2C: case 0x3C: {
     uint8_t old = GBCPU_get_reg(gb, (opcode >> 3) & 0b111);
     uint8_t res = old + 1;
 
@@ -498,14 +570,7 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
   }
 
   // DEC r8
-  case 0x05:
-  case 0x15:
-  case 0x25:
-  case 0x35:
-  case 0x0D:
-  case 0x1D:
-  case 0x2D:
-  case 0x3D: {
+  case 0x05: case 0x15: case 0x25: case 0x35: case 0x0D: case 0x1D: case 0x2D: case 0x3D: {
     uint8_t old = GBCPU_get_reg(gb, (opcode >> 3) & 0b111);
     uint8_t res = old - 1;
 
@@ -517,25 +582,56 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
     break;
   }
 
+  // INC r16
+  case 0x03: case 0x13: case 0x23: case 0x33:
+    GBCPU_set_reg_pair2(gb, (opcode >> 4) & 0b11, GBCPU_get_reg_pair2(gb, (opcode >> 4) & 0b11) + 1);
+    break;
+
   // DEC r16
-  case 0x0B:
-  case 0x1B:
-  case 0x2B:
-  case 0x3B:
+  case 0x0B: case 0x1B: case 0x2B: case 0x3B:
     GBCPU_set_reg_pair2(gb, (opcode >> 4) & 0b11, GBCPU_get_reg_pair2(gb, (opcode >> 4) & 0b11) - 1);
     break;
 
   // LD r8, u8
-  case 0x06:
-  case 0x16:
-  case 0x26:
-  case 0x36:
-  case 0x0E:
-  case 0x1E:
-  case 0x2E:
-  case 0x3E:
+  case 0x06: case 0x16: case 0x26: case 0x36: case 0x0E: case 0x1E: case 0x2E: case 0x3E:
     GBCPU_set_reg(gb, (opcode >> 3) & 0b111, GBCPU_next8(gb));
     break;
+
+  // CPL
+  case 0x2F:
+    gb->regs[GBCPU_REG_A] ^= 0xFF;
+
+    GBCPU_setN(gb, true);
+    GBCPU_setH(gb, true);
+    break;
+
+  // AND A, u8
+  case 0xE6: {
+    uint8_t op = GBCPU_next8(gb);
+    uint8_t res = gb->regs[GBCPU_REG_A] & op;
+
+    gb->regs[GBCPU_REG_A] = res;
+
+    GBCPU_setZ(gb, res == 0);
+    GBCPU_setN(gb, false);
+    GBCPU_setH(gb, false);
+    GBCPU_setC(gb, false);
+    break;
+  }
+
+  // OR A, u8
+  case 0xF6: {
+    uint8_t op = GBCPU_next8(gb);
+    uint8_t res = gb->regs[GBCPU_REG_A] | op;
+
+    gb->regs[GBCPU_REG_A] = res;
+
+    GBCPU_setZ(gb, res == 0);
+    GBCPU_setN(gb, false);
+    GBCPU_setH(gb, false);
+    GBCPU_setC(gb, false);
+    break;
+  }
 
   // CP A, u8
   case 0xFE: {
@@ -549,15 +645,36 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
     break;
   }
 
+  // ADD r8
+  case 0x80: case 0x81: case 0x82: case 0x83: case 0x84: case 0x85: case 0x86: case 0x87: {
+    uint8_t op = GBCPU_get_reg(gb, opcode & 0b111);
+    uint8_t res = gb->regs[GBCPU_REG_A] + op;
+
+    gb->regs[GBCPU_REG_A] = res;
+
+    GBCPU_setZ(gb, res == 0);
+    GBCPU_setN(gb, false);
+    GBCPU_setH(gb, (op & 0xF) + (res & 0xF) > 0xF);
+    GBCPU_setC(gb, (uint32_t)op + res > 0xFF);
+    break;
+  }
+
+  // AND r8
+  case 0xA0: case 0xA1: case 0xA2: case 0xA3: case 0xA4: case 0xA5: case 0xA6: case 0xA7: {
+    uint8_t op = GBCPU_get_reg(gb, opcode & 0b111);
+    uint8_t res = gb->regs[GBCPU_REG_A] & op;
+
+    gb->regs[GBCPU_REG_A] = res;
+
+    GBCPU_setZ(gb, res == 0);
+    GBCPU_setN(gb, false);
+    GBCPU_setH(gb, false);
+    GBCPU_setC(gb, false);
+    break;
+  }
+
   // XOR r8
-  case 0xA8:
-  case 0xA9:
-  case 0xAA:
-  case 0xAB:
-  case 0xAC:
-  case 0xAD:
-  case 0xAE:
-  case 0xAF: {
+  case 0xA8: case 0xA9: case 0xAA: case 0xAB: case 0xAC: case 0xAD: case 0xAE: case 0xAF: {
     uint8_t op = GBCPU_get_reg(gb, opcode & 0b111);
     uint8_t res = gb->regs[GBCPU_REG_A] ^ op;
 
@@ -567,6 +684,88 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
     GBCPU_setN(gb, false);
     GBCPU_setH(gb, false);
     GBCPU_setC(gb, false);
+    break;
+  }
+
+  // OR r8
+  case 0xB0: case 0xB1: case 0xB2: case 0xB3: case 0xB4: case 0xB5: case 0xB6: case 0xB7: {
+    uint8_t op = GBCPU_get_reg(gb, opcode & 0b111);
+    uint8_t res = gb->regs[GBCPU_REG_A] | op;
+    
+    gb->regs[GBCPU_REG_A] = res;
+
+    GBCPU_setZ(gb, res == 0);
+    GBCPU_setN(gb, false);
+    GBCPU_setH(gb, false);
+    GBCPU_setC(gb, false);
+    break;
+  }
+
+  // LD r8, r8
+  case 0x40: case 0x41: case 0x42: case 0x43: case 0x44: case 0x45: case 0x46: case 0x47:
+  case 0x48: case 0x49: case 0x4A: case 0x4B: case 0x4C: case 0x4D: case 0x4E: case 0x4F:
+  case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55: case 0x56: case 0x57:
+  case 0x58: case 0x59: case 0x5A: case 0x5B: case 0x5C: case 0x5D: case 0x5E: case 0x5F:
+  case 0x60: case 0x61: case 0x62: case 0x63: case 0x64: case 0x65: case 0x66: case 0x67:
+  case 0x68: case 0x69: case 0x6A: case 0x6B: case 0x6C: case 0x6D: case 0x6E: case 0x6F:
+  case 0x70: case 0x71: case 0x72: case 0x73: case 0x74: case 0x75: /* HALT */ case 0x77:
+  case 0x78: case 0x79: case 0x7A: case 0x7B: case 0x7C: case 0x7D: case 0x7E: case 0x7F:
+    GBCPU_set_reg(gb, (opcode >> 3) & 0b111, GBCPU_get_reg(gb, opcode & 0b111));
+    break;
+  // clang-format on 
+
+  case 0xCB: {
+    uint8_t opcode2 = GBCPU_next8(gb);
+
+    uint8_t reg_id = opcode2 & 0b111;
+    uint8_t reg = GBCPU_get_reg(gb, reg_id);
+
+    switch (opcode2 >> 6) {
+      case 0:
+      switch ((opcode2 >> 3) & 0b111) {
+        case 0:
+          break;
+        case 1:
+          break;
+        case 2:
+          break;
+        case 3:
+          break;
+        case 4:
+          break;
+        case 5:
+          break;
+        case 6: // SWAP
+        {
+          uint8_t lower = (reg >> 0) & 0xF;
+          uint8_t upper = (reg >> 4) & 0xF;
+
+          uint8_t res = (lower << 4) | upper;
+
+          GBCPU_setZ(gb, res == 0);
+          GBCPU_setN(gb, false);
+          GBCPU_setH(gb, false);
+          GBCPU_setC(gb, false);
+          break;
+        }
+        case 7:
+          break;
+      }
+        break;
+      case 1:
+        break;
+      case 2:
+        break;
+      case 3:
+        break;
+
+      default:
+        printf("Unknown CB opcode: %02X @ PC:%04X\n", opcode2, gb->pc - 2);
+        GBCPU_print_status(gb, gb->pc - 1);
+        assert(0);
+        break;
+    }
+    
     break;
   }
 

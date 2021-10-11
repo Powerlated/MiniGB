@@ -1,4 +1,4 @@
--Wall
+-Wimplicit-fallthrough
 -I
 lib/SDL2-2.0.16/include
 -L
