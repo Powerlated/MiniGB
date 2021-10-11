@@ -71,6 +71,32 @@ int main(int argc, char *argv[]) {
                         case SDLK_SPACE:
                             turbo = pressed;
                             break;
+
+                        case SDLK_z:
+                            gbCore->button_b = pressed;
+                            break;
+                        case SDLK_x:
+                            gbCore->button_a = pressed;
+                            break;
+                        case SDLK_BACKSPACE:
+                            gbCore->button_select = pressed;
+                            break;
+                        case SDLK_RETURN:
+                            gbCore->button_start = pressed;
+                            break;
+
+                        case SDLK_DOWN:
+                            gbCore->button_down = pressed;
+                            break;
+                        case SDLK_UP:
+                            gbCore->button_up = pressed;
+                            break;
+                        case SDLK_LEFT:
+                            gbCore->button_left = pressed;
+                            break;
+                        case SDLK_RIGHT:
+                            gbCore->button_right = pressed;
+                            break;
                     }
                     break;
             }
