@@ -97,11 +97,12 @@ int main(int argc, char *argv[]) {
         dest.x = (int)((w - fillWidth) / 2);
         dest.y = (int)((h - fillHeight) / 2);
 
-        uint32_t pixels[GB_WIDTH * GB_HEIGHT];
-        for (int i = 0; i < GB_WIDTH * GB_HEIGHT; i++) {
-            pixels[i] = (i * 4543) | 0xFF000000;
-        }
-        SDL_UpdateTexture(texture, NULL, pixels, GB_WIDTH * BYTES_PER_PIXEL);
+        // cool colors
+        // uint32_t pixels[GB_WIDTH * GB_HEIGHT];
+        // for (int i = 0; i < GB_WIDTH * GB_HEIGHT; i++) {
+        //     pixels[i] = (i * 4543) | 0xFF000000;
+        // }
+        SDL_UpdateTexture(texture, NULL, GBPPU_get_display_screen_buffer(gbCore), GB_WIDTH * BYTES_PER_PIXEL);
 
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, texture, NULL, &dest);

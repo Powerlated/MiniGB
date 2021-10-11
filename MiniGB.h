@@ -4,6 +4,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#define SCREEN_WIDTH 160
+#define SCREEN_HEIGHT 144
+
+#define CYCLES_PER_FRAME 70224
+
 typedef enum {
   GBCPU_REG_B = 0,
   GBCPU_REG_C = 1,
@@ -24,7 +29,12 @@ typedef enum {
   GBCPU_REG_SP = 3,
 } RegisterPair;
 
-typedef enum { GB_IO_LCDC = 0x40, GB_IO_STAT = 0x41, GB_IO_LY = 0x44 } GbIo;
+typedef enum {
+  GB_IO_LCDC = 0x40,
+  GB_IO_STAT = 0x41,
+  GB_IO_LY = 0x44,
+  GB_IO_BGP = 0x47,
+} GbIo;
 
 typedef enum {
   GBPPU_MODE_HBLANK = 0,
@@ -33,17 +43,20 @@ typedef enum {
   GBPPU_MODE_DRAWING = 3
 } GbPpuMode;
 
-typedef enum { GB_IO_LCDC_ENABLE = 1 << 7 } GbIoLcdcBits;
-
-#define CYCLES_PER_FRAME 70224
+typedef enum {
+  GB_IO_LCDC_ENABLE = 1 << 7,
+  GB_IO_LCDC_TILE_DATA = 1 << 4,
+  GB_IO_LCDC_BG_TILE_MAP = 1 << 3,
+  GB_IO_LCDC_BG_ENABLE = 1 << 0
+} GbIoLcdcBits;
 
 typedef struct {
   int32_t frameTimer;
 
-  uint8_t rom[1024 * 1024 * 8]; // ROM - 8 MB
-  uint8_t wram[8192];           // Work RAM - 8 KB
-  uint8_t vram[8192];           // Video RAM - 8 KB
-  uint8_t hram[127];            // High RAM - 127 bytes
+  uint8_t rom[32768]; // ROM - 32 KB (Tetris is enough)
+  uint8_t wram[8192]; // Work RAM - 8 KB
+  uint8_t vram[8192]; // Video RAM - 8 KB
+  uint8_t hram[127];  // High RAM - 127 bytes
 
   uint8_t io[256];
 
@@ -64,9 +77,22 @@ typedef struct {
   bool ime;
 
   // PPU
+  uint8_t current_screen_buffer;
+  uint32_t screen_buffer_0[SCREEN_WIDTH * SCREEN_HEIGHT];
+  uint32_t screen_buffer_1[SCREEN_WIDTH * SCREEN_HEIGHT];
   int32_t modeTimer;
 
 } GB_core_t;
+
+uint32_t *GBPPU_get_display_screen_buffer(GB_core_t *gb) {
+  return gb->current_screen_buffer ? gb->screen_buffer_0 : gb->screen_buffer_1;
+}
+
+uint32_t *GBPPU_get_internal_screen_buffer(GB_core_t *gb) {
+  return gb->current_screen_buffer ? gb->screen_buffer_1 : gb->screen_buffer_0;
+}
+
+void GBPPU_swap_buffers(GB_core_t *gb) { gb->current_screen_buffer ^= 1; }
 
 uint8_t GBPPU_get_mode(GB_core_t *gb) { return gb->io[GB_IO_STAT] & 0b11; }
 void GBPPU_set_mode(GB_core_t *gb, GbPpuMode mode) {
@@ -81,12 +107,55 @@ void GBPPU_write_lcdc(GB_core_t *gb, uint8_t val) {
     GBPPU_set_mode(gb, GBPPU_MODE_OAM);
   }
   // bit 7 on to off
-  if (val & GB_IO_LCDC_ENABLE && !(gb->io[GB_IO_LCDC] & GB_IO_LCDC_ENABLE)) {
+  if (!(val & GB_IO_LCDC_ENABLE) && (gb->io[GB_IO_LCDC] & GB_IO_LCDC_ENABLE)) {
     printf("PPU disable\n");
-    GBPPU_set_mode(gb, GBPPU_MODE_OAM);
+    GBPPU_set_mode(gb, GBPPU_MODE_HBLANK);
+
+    gb->io[GB_IO_LY] = 0;
   }
 
   gb->io[GB_IO_LCDC] = val;
+}
+
+void GBPPU_render_scanline(GB_core_t *gb) {
+  if (gb->io[GB_IO_LCDC] & GB_IO_LCDC_BG_ENABLE) {
+    uint32_t *screen = GBPPU_get_internal_screen_buffer(gb);
+    uint32_t screen_base = gb->io[GB_IO_LY] * 160;
+
+    uint8_t tileY = gb->io[GB_IO_LY] >> 3;
+    uint8_t fineY = gb->io[GB_IO_LY] & 0b111;
+
+    uint16_t map_base =
+        gb->io[GB_IO_LCDC] & GB_IO_LCDC_BG_TILE_MAP ? 0x1C00 : 0x1800;
+
+    map_base += tileY * 32;
+
+    for (uint32_t i = 0; i < 20; i++) {
+      uint8_t tile_id = gb->vram[map_base];
+      uint16_t tile_addr;
+
+      if (gb->io[GB_IO_LCDC] & GB_IO_LCDC_TILE_DATA) {
+        tile_addr = 0x0000 + tile_id * 16;
+      } else {
+        tile_addr = 0x1000 + (int8_t)tile_id * 16;
+      }
+
+      uint8_t b0 = gb->vram[tile_addr + fineY * 2];
+      uint8_t b1 = gb->vram[tile_addr + fineY * 2 + 1];
+
+      for (uint32_t j = 0; j < 8; j++) {
+        uint8_t color_raw = ((b1 >> 6) & 0b10) | ((b0 >> 7) & 1);
+        uint8_t color = (gb->io[GB_IO_BGP] >> color_raw * 2) & 0b11;
+
+        screen[screen_base++] = (0x00555555 * (3 - color)) | 0xFF000000;
+
+        b0 <<= 1;
+        b1 <<= 1;
+      }
+
+      map_base++;
+    }
+  }
 }
 
 void GBPPU_step(GB_core_t *gb, uint8_t cycles) {
@@ -105,6 +174,8 @@ void GBPPU_step(GB_core_t *gb, uint8_t cycles) {
       if (gb->modeTimer >= 172) {
         gb->modeTimer -= 172;
 
+        GBPPU_render_scanline(gb);
+
         GBPPU_set_mode(gb, GBPPU_MODE_HBLANK);
       }
       break;
@@ -115,6 +186,8 @@ void GBPPU_step(GB_core_t *gb, uint8_t cycles) {
         gb->io[GB_IO_LY]++;
 
         if (gb->io[GB_IO_LY] == 144) {
+          GBPPU_swap_buffers(gb);
+
           GBPPU_set_mode(gb, GBPPU_MODE_VBLANK);
         } else {
           GBPPU_set_mode(gb, GBPPU_MODE_OAM);
@@ -139,6 +212,7 @@ void GBPPU_step(GB_core_t *gb, uint8_t cycles) {
 uint8_t GB_read_io(GB_core_t *gb, uint16_t addr) {
   switch (addr & 0xFF) {
   case GB_IO_LY:
+  case GB_IO_BGP:
     return gb->io[addr & 0xFF];
   }
 
@@ -151,6 +225,9 @@ void GB_write_io(GB_core_t *gb, uint16_t addr, uint8_t val) {
   switch (addr & 0xFF) {
   case GB_IO_LCDC:
     GBPPU_write_lcdc(gb, val);
+    return;
+  case GB_IO_BGP:
+    gb->io[addr & 0xFF] = val;
     return;
   }
 
@@ -377,7 +454,7 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
   uint8_t opcode = GB_read(gb, gb->pc++);
 
   // We're going to turn formatting off here because
-  // it's extremely annoying when trying to keep cases on thes ame line
+  // it's extremely annoying when trying to keep cases on the same line
   // clang-format off
   switch (opcode) {
 
