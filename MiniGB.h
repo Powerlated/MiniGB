@@ -33,13 +33,17 @@ typedef enum {
 
 typedef enum {
   GB_IO_JOYP = 0x00,
+  GB_IO_DIV = 0x04,
   GB_IO_IF = 0x0F,
   GB_IO_LCDC = 0x40,
   GB_IO_STAT = 0x41,
   GB_IO_SCY = 0x42,
   GB_IO_SCX = 0x43,
   GB_IO_LY = 0x44,
+  GB_IO_DMA = 0x46,
   GB_IO_BGP = 0x47,
+  GB_IO_OBP0 = 0x48,
+  GB_IO_OBP1 = 0x49,
   GB_IO_IE = 0xFF,
 } GbIo;
 
@@ -59,7 +63,7 @@ typedef enum {
 } GbInterrupt;
 
 typedef struct {
-  int32_t frameTimer;
+  int32_t frame_timer;
 
   uint8_t rom[32768]; // ROM - 32 KB (Tetris is enough)
   uint8_t wram[8192]; // Work RAM - 8 KB
@@ -71,7 +75,7 @@ typedef struct {
   uint8_t oam[160];
 
   // CPU
-  uint8_t currentInstrCycles;
+  uint8_t current_instr_cycles;
 
   // Order:
   // B, C, D, E, H, L, F, A
@@ -87,7 +91,8 @@ typedef struct {
   uint8_t current_screen_buffer;
   uint32_t screen_buffer_0[SCREEN_WIDTH * SCREEN_HEIGHT];
   uint32_t screen_buffer_1[SCREEN_WIDTH * SCREEN_HEIGHT];
-  int32_t modeTimer;
+  int32_t mode_timer;
+  int32_t mode_timer_target;
 
   // Joypad
   bool button_start;
@@ -99,6 +104,8 @@ typedef struct {
   bool button_left;
   bool button_right;
 
+  // Timer
+  uint16_t internal_timer;
 } GB_core_t;
 
 void GB_flag_interrupt(GB_core_t *gb, GbInterrupt interrupt) {
@@ -124,12 +131,14 @@ void GBPPU_set_mode(GB_core_t *gb, GbPpuMode mode) {
 void GB_write_io_lcdc(GB_core_t *gb, uint8_t val) {
   // bit 7 off to on
   if (val & BIT(7) && !(gb->io[GB_IO_LCDC] & BIT(7))) {
-    printf("PPU enable\n");
+    // printf("PPU enable\n");
+    gb->mode_timer_target = 80;
     GBPPU_set_mode(gb, GBPPU_MODE_OAM);
   }
   // bit 7 on to off
   if (!(val & BIT(7)) && (gb->io[GB_IO_LCDC] & BIT(7))) {
-    printf("PPU disable\n");
+    // printf("PPU disable\n");
+    gb->mode_timer = 0;
     GBPPU_set_mode(gb, GBPPU_MODE_HBLANK);
 
     gb->io[GB_IO_LY] = 0;
@@ -139,16 +148,16 @@ void GB_write_io_lcdc(GB_core_t *gb, uint8_t val) {
 }
 
 void GBPPU_render_scanline(GB_core_t *gb) {
+  uint32_t *screen = GBPPU_get_internal_screen_buffer(gb);
   if (gb->io[GB_IO_LCDC] & BIT(0)) {
-    uint32_t *screen = GBPPU_get_internal_screen_buffer(gb);
     uint32_t screen_base = gb->io[GB_IO_LY] * 160;
 
-    uint8_t tileY = gb->io[GB_IO_LY] >> 3;
-    uint8_t fineY = gb->io[GB_IO_LY] & 0b111;
+    uint8_t tile_y = gb->io[GB_IO_LY] >> 3;
+    uint8_t fine_y = gb->io[GB_IO_LY] & 0b111;
 
     uint16_t map_base = gb->io[GB_IO_LCDC] & BIT(3) ? 0x1C00 : 0x1800;
 
-    map_base += tileY * 32;
+    map_base += tile_y * 32;
 
     for (uint32_t i = 0; i < 20; i++) {
       uint8_t tile_id = gb->vram[map_base];
@@ -160,8 +169,8 @@ void GBPPU_render_scanline(GB_core_t *gb) {
         tile_addr = 0x1000 + (int8_t)tile_id * 16;
       }
 
-      uint8_t b0 = gb->vram[tile_addr + fineY * 2];
-      uint8_t b1 = gb->vram[tile_addr + fineY * 2 + 1];
+      uint8_t b0 = gb->vram[tile_addr + fine_y * 2];
+      uint8_t b1 = gb->vram[tile_addr + fine_y * 2 + 1];
 
       for (uint32_t j = 0; j < 8; j++) {
         uint8_t color_raw = ((b1 >> 6) & 0b10) | ((b0 >> 7) & 1);
@@ -174,6 +183,45 @@ void GBPPU_render_scanline(GB_core_t *gb) {
       }
 
       map_base++;
+    }
+  }
+
+  if (gb->io[GB_IO_LCDC] & BIT(1)) {
+
+    for (uint32_t i = 0; i < 160; i += 4) {
+      uint8_t y = gb->oam[i + 0];
+      uint8_t x = gb->oam[i + 1];
+      uint8_t tile = gb->oam[i + 2];
+      uint8_t attr = gb->oam[i + 3];
+
+      int16_t screen_y = (int16_t)y - 16;
+      int16_t screen_x = (int16_t)x - 8;
+
+      if (gb->io[GB_IO_LY] >= screen_y && gb->io[GB_IO_LY] < screen_y + 8) {
+        uint32_t screen_base = gb->io[GB_IO_LY] * 160 + screen_x;
+
+        uint8_t palette = gb->io[attr & BIT(4) ? GB_IO_OBP1 : GB_IO_OBP0];
+        uint16_t tile_addr = tile * 16;
+        uint8_t fine_y = (gb->io[GB_IO_LY] - screen_y) & 7;
+
+        uint8_t b0 = gb->vram[tile_addr + fine_y * 2];
+        uint8_t b1 = gb->vram[tile_addr + fine_y * 2 + 1];
+
+        for (uint32_t j = 0; j < 8; j++) {
+          uint8_t color_raw = ((b1 >> 6) & 0b10) | ((b0 >> 7) & 1);
+          uint8_t color = (palette >> color_raw * 2) & 0b11;
+
+          if (screen_x >= 0 && screen_x < 160 && color_raw != 0) {
+            screen[screen_base] = (0x00555555 * (3 - color_raw)) | 0xFF000000;
+          }
+
+          b0 <<= 1;
+          b1 <<= 1;
+
+          screen_x++;
+          screen_base++;
+        }
+      }
     }
   }
 }
@@ -209,51 +257,47 @@ uint8_t GB_read_io_joyp(GB_core_t *gb) {
   return val;
 }
 
-void GBPPU_step(GB_core_t *gb, uint8_t cycles) {
-  gb->modeTimer += cycles;
+void GB_timer_tick(GB_core_t *gb, uint8_t cycles) {
+  gb->internal_timer += cycles;
+}
 
+void GB_ppu_tick(GB_core_t *gb, uint8_t cycles) {
   if (gb->io[GB_IO_LCDC] & BIT(7)) {
-    switch (GBPPU_get_mode(gb)) {
-    case GBPPU_MODE_OAM:
-      if (gb->modeTimer >= 80) {
-        gb->modeTimer -= 80;
+    gb->mode_timer += cycles;
 
+    if (gb->mode_timer >= gb->mode_timer_target) {
+      gb->mode_timer -= gb->mode_timer_target;
+
+      switch (GBPPU_get_mode(gb)) {
+      case GBPPU_MODE_OAM:
+        gb->mode_timer_target = 172;
         GBPPU_set_mode(gb, GBPPU_MODE_DRAWING);
-      }
-      break;
-    case GBPPU_MODE_DRAWING:
-      if (gb->modeTimer >= 172) {
-        gb->modeTimer -= 172;
-
+        break;
+      case GBPPU_MODE_DRAWING:
+        gb->mode_timer_target = 204;
         GBPPU_render_scanline(gb);
-
         GBPPU_set_mode(gb, GBPPU_MODE_HBLANK);
-      }
-      break;
-    case GBPPU_MODE_HBLANK:
-      if (gb->modeTimer >= 204) {
-        gb->modeTimer -= 204;
-
+        break;
+      case GBPPU_MODE_HBLANK:
         gb->io[GB_IO_LY]++;
 
         if (gb->io[GB_IO_LY] == 144) {
           GBPPU_swap_buffers(gb);
           GB_flag_interrupt(gb, GB_INTR_VBLANK);
 
+          gb->mode_timer_target = 456;
           GBPPU_set_mode(gb, GBPPU_MODE_VBLANK);
         } else {
+          gb->mode_timer_target = 80;
           GBPPU_set_mode(gb, GBPPU_MODE_OAM);
         }
-      }
-      break;
-    case GBPPU_MODE_VBLANK:
-      if (gb->modeTimer >= 456) {
-        gb->modeTimer -= 456;
-
+        break;
+      case GBPPU_MODE_VBLANK:
         gb->io[GB_IO_LY]++;
 
         if (gb->io[GB_IO_LY] == 154) {
           gb->io[GB_IO_LY] = 0;
+          gb->mode_timer_target = 80;
           GBPPU_set_mode(gb, GBPPU_MODE_OAM);
         }
       }
@@ -265,40 +309,23 @@ uint8_t GB_read_io(GB_core_t *gb, uint16_t addr) {
   switch (addr & 0xFF) {
   case GB_IO_JOYP:
     return GB_read_io_joyp(gb);
+  case GB_IO_DIV:
+    return gb->internal_timer >> 8;
   case GB_IO_LY:
-    // return 0x90;
   case GB_IO_IF:
   case GB_IO_STAT:
   case GB_IO_SCY:
   case GB_IO_SCX:
   case GB_IO_BGP:
+  case GB_IO_OBP0:
+  case GB_IO_OBP1:
   case GB_IO_IE:
     return gb->io[addr & 0xFF];
   }
 
-  printf("unhandled IO read addr:%04X\n", addr);
+  // printf("unhandled IO read addr:%04X\n", addr);
 
   return 0xFF;
-}
-
-void GB_write_io(GB_core_t *gb, uint16_t addr, uint8_t val) {
-  switch (addr & 0xFF) {
-  case GB_IO_IF:
-    GB_write_io_if(gb, val);
-    return;
-  case GB_IO_LCDC:
-    GB_write_io_lcdc(gb, val);
-    return;
-  case GB_IO_JOYP:
-  case GB_IO_SCY:
-  case GB_IO_SCX:
-  case GB_IO_BGP:
-  case GB_IO_IE:
-    gb->io[addr & 0xFF] = val;
-    return;
-  }
-
-  printf("unhandled IO write addr:%04X val:%02X\n", addr, val);
 }
 
 uint8_t GB_read(GB_core_t *gb, uint16_t addr) {
@@ -337,6 +364,33 @@ uint8_t GB_read(GB_core_t *gb, uint16_t addr) {
   }
 
   return 0;
+}
+
+void GB_write_io(GB_core_t *gb, uint16_t addr, uint8_t val) {
+  switch (addr & 0xFF) {
+  case GB_IO_IF:
+    GB_write_io_if(gb, val);
+    return;
+  case GB_IO_LCDC:
+    GB_write_io_lcdc(gb, val);
+    return;
+  case GB_IO_DMA:
+    for (uint32_t i = 0; i < 160; i++) {
+      gb->oam[i] = GB_read(gb, (val << 8) + i);
+    }
+    return;
+  case GB_IO_JOYP:
+  case GB_IO_SCY:
+  case GB_IO_SCX:
+  case GB_IO_BGP:
+  case GB_IO_OBP0:
+  case GB_IO_OBP1:
+  case GB_IO_IE:
+    gb->io[addr & 0xFF] = val;
+    return;
+  }
+
+  // printf("unhandled IO write addr:%04X val:%02X\n", addr, val);
 }
 
 void GB_write(GB_core_t *gb, uint16_t addr, uint8_t val) {
@@ -451,13 +505,13 @@ void GBCPU_set_reg(GB_core_t *gb, uint8_t reg, uint8_t val) {
 }
 
 uint8_t GBCPU_next8(GB_core_t *gb) {
-  gb->currentInstrCycles += 4;
+  gb->current_instr_cycles += 4;
 
   return GB_read(gb, gb->pc++);
 }
 
 uint16_t GBCPU_next16(GB_core_t *gb) {
-  gb->currentInstrCycles += 8;
+  gb->current_instr_cycles += 8;
 
   uint8_t b0 = GB_read(gb, gb->pc++);
   uint8_t b1 = GB_read(gb, gb->pc++);
@@ -501,12 +555,12 @@ bool GBCPU_get_cond(GB_core_t *gb, uint8_t cond) {
 }
 
 uint8_t GBCPU_read(GB_core_t *gb, uint16_t addr) {
-  gb->currentInstrCycles += 4;
+  gb->current_instr_cycles += 4;
   return GB_read(gb, addr);
 }
 
 void GBCPU_write(GB_core_t *gb, uint16_t addr, uint8_t val) {
-  gb->currentInstrCycles += 4;
+  gb->current_instr_cycles += 4;
   GB_write(gb, addr, val);
 }
 
@@ -539,7 +593,8 @@ void GBCPU_instr_adc(GB_core_t *gb, uint8_t op) {
 
   GBCPU_setZ(gb, res == 0);
   GBCPU_setN(gb, false);
-  GBCPU_setH(gb, (gb->regs[GBCPU_REG_A] & 0xF) + (op & 0xF) + GBCPU_getC(gb) > 0xF);
+  GBCPU_setH(gb,
+             (gb->regs[GBCPU_REG_A] & 0xF) + (op & 0xF) + GBCPU_getC(gb) > 0xF);
   GBCPU_setC(gb, (uint32_t)gb->regs[GBCPU_REG_A] + op + GBCPU_getC(gb) > 0xFF);
 
   gb->regs[GBCPU_REG_A] = res;
@@ -610,7 +665,7 @@ void GBCPU_instr_cp(GB_core_t *gb, uint8_t op) {
 }
 
 uint8_t GBCPU_execute(GB_core_t *gb) {
-  gb->currentInstrCycles = 0;
+  gb->current_instr_cycles = 0;
 
   // GBCPU_print_status(gb, gb->pc);
 
@@ -1147,38 +1202,39 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
     break;
   }
 
-  return gb->currentInstrCycles;
+  return gb->current_instr_cycles;
 }
 
 void GB_run_to_next_frame(GB_core_t *gb) {
   // Since we don't know how long the next instruction will take,
   // we use a persistent timer in case an instruction overshoots
   // the alloted time of 70224 cycles per frame
-  gb->frameTimer += CYCLES_PER_FRAME;
+  gb->frame_timer += CYCLES_PER_FRAME;
 
-  while (gb->frameTimer > 0) {
+  while (gb->frame_timer > 0) {
     uint8_t cycles = GBCPU_execute(gb);
 
-    gb->frameTimer -= cycles;
+    gb->frame_timer -= cycles;
 
-    GBPPU_step(gb, cycles);
+    GB_ppu_tick(gb, cycles);
+    GB_timer_tick(gb, cycles);
   }
 }
 
 void GB_init(GB_core_t *gb) {
   memset(gb, 0, sizeof(GB_core_t));
 
-  // gb->pc = 0x100;
-  // gb->regs[GBCPU_REG_A] = 0x01;
-  // gb->regs[GBCPU_REG_F] = 0xB0;
-  // gb->regs[GBCPU_REG_B] = 0x00;
-  // gb->regs[GBCPU_REG_C] = 0x13;
-  // gb->regs[GBCPU_REG_D] = 0x00;
-  // gb->regs[GBCPU_REG_E] = 0xD8;
-  // gb->regs[GBCPU_REG_H] = 0x01;
-  // gb->regs[GBCPU_REG_L] = 0x4D;
-  // gb->sp = 0xFFFE;
+  gb->pc = 0x100;
+  gb->regs[GBCPU_REG_A] = 0x01;
+  gb->regs[GBCPU_REG_F] = 0xB0;
+  gb->regs[GBCPU_REG_B] = 0x00;
+  gb->regs[GBCPU_REG_C] = 0x13;
+  gb->regs[GBCPU_REG_D] = 0x00;
+  gb->regs[GBCPU_REG_E] = 0xD8;
+  gb->regs[GBCPU_REG_H] = 0x01;
+  gb->regs[GBCPU_REG_L] = 0x4D;
+  gb->sp = 0xFFFE;
 
-  // GB_write_io_lcdc(gb, 0x91);
-  // GB_write_io_if(gb, 0xE1);
+  GB_write_io_lcdc(gb, 0x91);
+  GB_write_io_if(gb, 0xE1);
 }

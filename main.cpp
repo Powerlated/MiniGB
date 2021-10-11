@@ -52,6 +52,7 @@ int main(int argc, char *argv[]) {
     bool turbo = false;
 
     double nextFrameAt = 0;
+    double fpsEvalTimer = 0;
     bool done = false;
     while (!done) {
         SDL_Event evt;
@@ -103,7 +104,7 @@ int main(int argc, char *argv[]) {
         }
 
         double currentSec = GetTime();
-
+        
         // Reset time if behind schedule
         if (currentSec - nextFrameAt >= SECONDS_PER_FRAME)
         {
@@ -117,42 +118,40 @@ int main(int argc, char *argv[]) {
             nextFrameAt += SECONDS_PER_FRAME;
 
             GB_run_to_next_frame(gbCore);
+
+            int w;
+            int h;
+            SDL_GetWindowSize(window, &w, &h);
+
+            double ratio = std::min((double)h / (double)HEIGHT, (double)w / (double)WIDTH);
+            int fillWidth;
+            int fillHeight;
+
+            fillWidth = (int)(ratio * WIDTH);
+            fillHeight = (int)(ratio * HEIGHT);
+
+            SDL_Rect dest;
+            dest.w = fillWidth;
+            dest.h = fillHeight;
+            dest.x = (int)((w - fillWidth) / 2);
+            dest.y = (int)((h - fillHeight) / 2);
+
+            // cool colors
+            // uint32_t pixels[GB_WIDTH * GB_HEIGHT];
+            // for (int i = 0; i < GB_WIDTH * GB_HEIGHT; i++) {
+            //     pixels[i] = (i * 4543) | 0xFF000000;
+            // }
+            SDL_UpdateTexture(texture, NULL, GBPPU_get_display_screen_buffer(gbCore), GB_WIDTH * BYTES_PER_PIXEL);
+
+            SDL_RenderClear(renderer);
+            SDL_RenderCopy(renderer, texture, NULL, &dest);
+            SDL_RenderPresent(renderer);
         }
-
-        if (turbo) {
-            GB_run_to_next_frame(gbCore);
-        }
-
-        int w;
-        int h;
-        SDL_GetWindowSize(window, &w, &h);
-
-        double ratio = std::min((double)h / (double)HEIGHT, (double)w / (double)WIDTH);
-        int fillWidth;
-        int fillHeight;
-
-        fillWidth = (int)(ratio * WIDTH);
-        fillHeight = (int)(ratio * HEIGHT);
-
-        SDL_Rect dest;
-        dest.w = fillWidth;
-        dest.h = fillHeight;
-        dest.x = (int)((w - fillWidth) / 2);
-        dest.y = (int)((h - fillHeight) / 2);
-
-        // cool colors
-        // uint32_t pixels[GB_WIDTH * GB_HEIGHT];
-        // for (int i = 0; i < GB_WIDTH * GB_HEIGHT; i++) {
-        //     pixels[i] = (i * 4543) | 0xFF000000;
-        // }
-        SDL_UpdateTexture(texture, NULL, GBPPU_get_display_screen_buffer(gbCore), GB_WIDTH * BYTES_PER_PIXEL);
-
-        SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, texture, NULL, &dest);
-        SDL_RenderPresent(renderer);
 
         if (!turbo) {
             SDL_Delay(1);
+        } else {
+            GB_run_to_next_frame(gbCore);
         }
     }
 
