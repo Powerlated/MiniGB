@@ -8,7 +8,7 @@ extern "C" {
 #include "MiniGB.h"
 }
 
-const int WIDTH = 640;
+const int WIDTH = 640 * 2;
 const int HEIGHT = 576;
 
 const int GB_WIDTH = 160;
@@ -29,6 +29,7 @@ int main(int argc, char *argv[]) {
     SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     SDL_Renderer *renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     SDL_Texture *texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, GB_WIDTH, GB_HEIGHT);
+    SDL_Texture *texture2 = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, GB_WIDTH, GB_HEIGHT);
 
     SDL_SetWindowMinimumSize(window, WIDTH, HEIGHT);
 
@@ -43,7 +44,10 @@ int main(int argc, char *argv[]) {
     
     GB_core_t *gbCore = (GB_core_t*)malloc(sizeof(GB_core_t));
     GB_init(gbCore);
+    GB_core_t *gbCore2 = (GB_core_t*)malloc(sizeof(GB_core_t));
+    GB_init(gbCore2);
     file.read((char*)gbCore->rom, size);
+    memcpy(gbCore2->rom, gbCore->rom, size);
     if (file.fail()) {
         printf("Couldn't read ROM file\n");
         exit(1);
@@ -52,7 +56,8 @@ int main(int argc, char *argv[]) {
     bool turbo = false;
 
     double nextFrameAt = 0;
-    double fpsEvalTimer = 0;
+    double fpsEvalTimer = GetTime();
+    uint32_t cyclesRan = 0;
     bool done = false;
     while (!done) {
         SDL_Event evt;
@@ -105,6 +110,22 @@ int main(int argc, char *argv[]) {
 
         double currentSec = GetTime();
         
+        if (currentSec >= fpsEvalTimer)
+        {
+            double diff = currentSec - fpsEvalTimer + 1;
+            double frames = (double)cyclesRan / CYCLES_PER_FRAME;
+
+            // printf("%f\n", currentSec);
+            // printf("%f\n", diff);
+
+            char title[256];
+            sprintf_s(title, "MiniGB - %f fps", (frames / diff));
+            SDL_SetWindowTitle(window, title);
+
+            fpsEvalTimer += 1;
+            cyclesRan = 0;
+        }
+        
         // Reset time if behind schedule
         if (currentSec - nextFrameAt >= SECONDS_PER_FRAME)
         {
@@ -117,7 +138,8 @@ int main(int argc, char *argv[]) {
         {
             nextFrameAt += SECONDS_PER_FRAME;
 
-            GB_run_to_next_frame(gbCore);
+            cyclesRan += GB_run_to_next_frame(gbCore);
+            cyclesRan += GB_run_to_next_frame(gbCore2);
 
             int w;
             int h;
@@ -131,10 +153,16 @@ int main(int argc, char *argv[]) {
             fillHeight = (int)(ratio * HEIGHT);
 
             SDL_Rect dest;
-            dest.w = fillWidth;
+            dest.w = fillWidth / 2;
             dest.h = fillHeight;
             dest.x = (int)((w - fillWidth) / 2);
             dest.y = (int)((h - fillHeight) / 2);
+
+            SDL_Rect dest2;
+            dest2.w = fillWidth / 2;
+            dest2.h = fillHeight;
+            dest2.x = (int)((w - fillWidth) / 2 + fillWidth / 2);
+            dest2.y = (int)((h - fillHeight) / 2);
 
             // cool colors
             // uint32_t pixels[GB_WIDTH * GB_HEIGHT];
@@ -142,16 +170,19 @@ int main(int argc, char *argv[]) {
             //     pixels[i] = (i * 4543) | 0xFF000000;
             // }
             SDL_UpdateTexture(texture, NULL, GBPPU_get_display_screen_buffer(gbCore), GB_WIDTH * BYTES_PER_PIXEL);
+            SDL_UpdateTexture(texture2, NULL, GBPPU_get_display_screen_buffer(gbCore2), GB_WIDTH * BYTES_PER_PIXEL);
 
             SDL_RenderClear(renderer);
             SDL_RenderCopy(renderer, texture, NULL, &dest);
+            SDL_RenderCopy(renderer, texture2, NULL, &dest2);
             SDL_RenderPresent(renderer);
         }
 
         if (!turbo) {
             SDL_Delay(1);
         } else {
-            GB_run_to_next_frame(gbCore);
+            cyclesRan += GB_run_to_next_frame(gbCore);
+            cyclesRan += GB_run_to_next_frame(gbCore2);
         }
     }
 

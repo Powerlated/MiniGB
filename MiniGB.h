@@ -694,9 +694,8 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
   // RLCA
   case 0x07: {
     uint8_t val = gb->regs[GBCPU_REG_A];
-    uint8_t leftmostBit = (val & 0b10000000) >> 7;
     
-    gb->regs[GBCPU_REG_A] = (val << 1) | leftmostBit;
+    gb->regs[GBCPU_REG_A] = (val << 1) | (val >> 7);
 
     GBCPU_setZ(gb, false);
     GBCPU_setN(gb, false);
@@ -1205,7 +1204,9 @@ uint8_t GBCPU_execute(GB_core_t *gb) {
   return gb->current_instr_cycles;
 }
 
-void GB_run_to_next_frame(GB_core_t *gb) {
+uint32_t GB_run_to_next_frame(GB_core_t *gb) {
+  uint32_t total_cycles = 0;
+
   // Since we don't know how long the next instruction will take,
   // we use a persistent timer in case an instruction overshoots
   // the alloted time of 70224 cycles per frame
@@ -1213,12 +1214,15 @@ void GB_run_to_next_frame(GB_core_t *gb) {
 
   while (gb->frame_timer > 0) {
     uint8_t cycles = GBCPU_execute(gb);
+    total_cycles += cycles;
 
     gb->frame_timer -= cycles;
 
     GB_ppu_tick(gb, cycles);
     GB_timer_tick(gb, cycles);
   }
+
+  return total_cycles;
 }
 
 void GB_init(GB_core_t *gb) {
